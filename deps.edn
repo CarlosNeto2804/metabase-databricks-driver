@@ -1,0 +1,14 @@
+{:paths
+ ["src" "resources"]
+
+ :deps
+ {com.databricks/databricks-jdbc {:mvn/version "2.6.36" :exclusion [log4j/log4j]}}
+
+
+ :mvn/repos
+ {"opensaml" {:url "https://build.shibboleth.net/nexus/content/repositories/releases/"}}
+
+ :aliases
+ {:dev
+  {:extra-deps
+   {io.github.metabase/metabase {:git/tag "v0.46.6.4", :git/sha "7c60aca"}}}}}
