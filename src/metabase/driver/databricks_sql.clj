@@ -230,6 +230,10 @@
     :minute :m :min :mins :minutes
     :second :s :sec :seconds :secs})
 
+(defmethod driver/db-start-of-week :databricks-sql
+  [_]
+  :sunday)
+
 (defn- format-date-extract
   [_fn [unit expr]]
   {:pre [(contains? date-extract-units unit)]}
@@ -242,7 +246,6 @@
 (defn- format-interval
   [_fn [amount unit]]
   {:pre [(number? amount)
-         ;; other units are supported too but we're not currently supporting them.
          (#{:year :month :week :day :hour :minute :second :millisecond} unit)]}
   [(format "(interval '%d' %s)" (long amount) (name unit))])
 
