@@ -1,6 +1,9 @@
 (ns metabase.driver.databricks-sql
     (:require [clojure.java.jdbc :as jdbc]
       [clojure.string :as str]
+      [buddy.core.codecs :as codecs]
+      [java-time :as t]
+      [honey.sql :as sql]
       [medley.core :as m]
       [metabase.driver :as driver]
       [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
@@ -10,8 +13,11 @@
       [metabase.driver.sql.util.unprepare :as unprepare]
       [metabase.driver.sql.util :as sql.u]
       [metabase.mbql.util :as mbql.u]
+      [metabase.util.date-2 :as u.date]
+      [metabase.util.honey-sql-2 :as h2x]
       [metabase.query-processor.util :as qp.util])
-    (:import [java.sql Connection ResultSet]))
+    (:import [java.sql Connection ResultSet Types]
+             [java.time LocalDate OffsetDateTime ZonedDateTime]))
 
 (set! *warn-on-reflection* true)
 
@@ -175,3 +181,195 @@
 (defmethod sql.qp/quote-style :databricks-sql
            [_driver]
            :mysql)
+
+
+;; Date Utils
+
+(defmethod sql.qp/current-datetime-honeysql-form :databricks-sql
+  [_]
+  (h2x/with-database-type-info :%now "timestamp"))
+
+(defmethod sql.qp/unix-timestamp->honeysql [:databricks-sql :seconds]
+  [_ _ expr]
+  (h2x/->timestamp [:from_unixtime expr]))
+
+(defn- date-format [format-str expr]
+  [:date_format expr (h2x/literal format-str)])
+
+(defn- str-to-date [format-str expr]
+  (h2x/->timestamp [:from_unixtime [:unix_timestamp expr (h2x/literal format-str)]]))
+
+(defn- trunc-with-format [format-str expr]
+  (str-to-date format-str (date-format format-str expr)))
+
+(defmethod sql.qp/date [:databricks-sql :default]         [_ _ expr] (h2x/->timestamp expr))
+(defmethod sql.qp/date [:databricks-sql :minute]          [_ _ expr] (trunc-with-format "yyyy-MM-dd HH:mm" (h2x/->timestamp expr)))
+(defmethod sql.qp/date [:databricks-sql :minute-of-hour]  [_ _ expr] [:minute (h2x/->timestamp expr)])
+(defmethod sql.qp/date [:databricks-sql :hour]            [_ _ expr] (trunc-with-format "yyyy-MM-dd HH" (h2x/->timestamp expr)))
+(defmethod sql.qp/date [:databricks-sql :hour-of-day]     [_ _ expr] [:hour (h2x/->timestamp expr)])
+(defmethod sql.qp/date [:databricks-sql :day]             [_ _ expr] (trunc-with-format "yyyy-MM-dd" (h2x/->timestamp expr)))
+(defmethod sql.qp/date [:databricks-sql :day-of-month]    [_ _ expr] [:dayofmonth (h2x/->timestamp expr)])
+(defmethod sql.qp/date [:databricks-sql :day-of-year]     [_ _ expr] (h2x/->integer (date-format "D" (h2x/->timestamp expr))))
+(defmethod sql.qp/date [:databricks-sql :month]           [_ _ expr] [:trunc (h2x/->timestamp expr) (h2x/literal :MM)])
+(defmethod sql.qp/date [:databricks-sql :month-of-year]   [_ _ expr] [:month (h2x/->timestamp expr)])
+(defmethod sql.qp/date [:databricks-sql :quarter-of-year] [_ _ expr] [:quarter (h2x/->timestamp expr)])
+(defmethod sql.qp/date [:databricks-sql :year]            [_ _ expr] [:trunc (h2x/->timestamp expr) (h2x/literal :year)])
+
+(def ^:private date-extract-units
+  "See https://spark.apache.org/docs/3.3.0/api/sql/#extract"
+  #{:year :y :years :yr :yrs
+    :yearofweek
+    :quarter :qtr
+    :month :mon :mons :months
+    :week :w :weeks
+    :day :d :days
+    :dayofweek :dow
+    :dayofweek_iso :dow_iso
+    :doy
+    :hour :h :hours :hr :hrs
+    :minute :m :min :mins :minutes
+    :second :s :sec :seconds :secs})
+
+(defn- format-date-extract
+  [_fn [unit expr]]
+  {:pre [(contains? date-extract-units unit)]}
+  (let [[expr-sql & expr-args] (sql/format-expr expr {:nested true})]
+    (into [(format "extract(%s FROM %s)" (name unit) expr-sql)]
+          expr-args)))
+
+(sql/register-fn! ::date-extract #'format-date-extract)
+
+(defn- format-interval
+  [_fn [amount unit]]
+  {:pre [(number? amount)
+         ;; other units are supported too but we're not currently supporting them.
+         (#{:year :month :week :day :hour :minute :second :millisecond} unit)]}
+  [(format "(interval '%d' %s)" (long amount) (name unit))])
+
+(sql/register-fn! ::interval #'format-interval)
+
+(defmethod sql.qp/date [:databricks-sql :day-of-week]
+  [driver _unit expr]
+  (sql.qp/adjust-day-of-week driver (-> [::date-extract :dow (h2x/->timestamp expr)]
+                                        (h2x/with-database-type-info "integer"))))
+
+(defmethod sql.qp/date [:databricks-sql :week]
+  [driver _unit expr]
+  (let [week-extract-fn (fn [expr]
+                          (-> [:date_sub
+                               (h2x/+ (h2x/->timestamp expr)
+                                      [::interval 1 :day])
+                               [::date-extract :dow (h2x/->timestamp expr)]]
+                              (h2x/with-database-type-info "timestamp")))]
+    (sql.qp/adjust-start-of-week driver week-extract-fn expr)))
+
+
+(defmethod sql.qp/date [:databricks-sql :week-of-year-iso]
+  [_driver _unit expr]
+  [:weekofyear (h2x/->timestamp expr)])
+
+(defmethod sql.qp/date [:databricks-sql :quarter]
+  [_driver _unit expr]
+  [:add_months
+   [:trunc (h2x/->timestamp expr) (h2x/literal :year)]
+   (h2x/* (h2x/- [:quarter (h2x/->timestamp expr)]
+                 1)
+          3)])
+
+(defmethod sql.qp/->honeysql [:databricks-sql :replace]
+  [driver [_ arg pattern replacement]]
+  [:regexp_replace
+   (sql.qp/->honeysql driver arg)
+   (sql.qp/->honeysql driver pattern)
+   (sql.qp/->honeysql driver replacement)])
+
+(defmethod sql.qp/->honeysql [:databricks-sql :regex-match-first]
+  [driver [_ arg pattern]]
+  [:regexp_extract (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver pattern) 0])
+
+(defmethod sql.qp/->honeysql [:databricks-sql :median]
+  [driver [_ arg]]
+  [:percentile (sql.qp/->honeysql driver arg) 0.5])
+
+(defmethod sql.qp/->honeysql [:databricks-sql :percentile]
+  [driver [_ arg p]]
+  [:percentile (sql.qp/->honeysql driver arg) (sql.qp/->honeysql driver p)])
+
+(defmethod sql.qp/add-interval-honeysql-form :databricks-sql
+  [driver hsql-form amount unit]
+  (if (= unit :quarter)
+    (recur driver hsql-form (* amount 3) :month)
+    (h2x/+ (h2x/->timestamp hsql-form)
+           [::interval amount unit])))
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :year]
+  [driver _unit x y]
+  [:div (sql.qp/datetime-diff driver :month x y) 12])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :quarter]
+  [driver _unit x y]
+  [:div (sql.qp/datetime-diff driver :month x y) 3])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :month]
+  [_driver _unit x y]
+  (h2x/->integer [:months_between y x]))
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :week]
+  [_driver _unit x y]
+  [:div [:datediff y x] 7])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :day]
+  [_driver _unit x y]
+  [:datediff y x])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :hour]
+  [driver _unit x y]
+  [:div (sql.qp/datetime-diff driver :second x y) 3600])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :minute]
+  [driver _unit x y]
+  [:div (sql.qp/datetime-diff driver :second x y) 60])
+
+(defmethod sql.qp/datetime-diff [:databricks-sql :second]
+  [_driver _unit x y]
+  [:- [:unix_timestamp y] [:unix_timestamp x]])
+
+(defmethod unprepare/unprepare-value [:databricks-sql String]
+  [_ ^String s]
+  (case *param-splice-style*
+    :friendly (str \' (sql.u/escape-sql s :backslashes) \')
+    :paranoid (format "decode(unhex('%s'), 'utf-8')" (codecs/bytes->hex (.getBytes s "UTF-8")))))
+
+(defmethod unprepare/unprepare-value [:databricks-sql LocalDate]
+  [driver t]
+  (unprepare/unprepare-value driver (t/local-date-time t (t/local-time 0))))
+
+(defmethod unprepare/unprepare-value [:databricks-sql OffsetDateTime]
+  [_ t]
+  (format "to_utc_timestamp('%s', '%s')" (u.date/format-sql (t/local-date-time t)) (t/zone-offset t)))
+
+(defmethod unprepare/unprepare-value [:databricks-sql ZonedDateTime]
+  [_ t]
+  (format "to_utc_timestamp('%s', '%s')" (u.date/format-sql (t/local-date-time t)) (t/zone-id t)))
+
+(defmethod sql-jdbc.execute/set-parameter [:databricks-sql LocalDate]
+  [driver ps i t]
+  (sql-jdbc.execute/set-parameter driver ps i (t/local-date-time t (t/local-time 0))))
+
+(defmethod sql-jdbc.execute/read-column-thunk [:databricks-sql Types/TIME]
+  [_ ^ResultSet rs _rsmeta ^Integer i]
+  (fn []
+    (when-let [t (.getTimestamp rs i)]
+      (t/offset-time (t/local-time t) (t/zone-offset 0)))))
+
+(defmethod sql-jdbc.execute/read-column-thunk [:databricks-sql Types/DATE]
+  [_ ^ResultSet rs _rsmeta ^Integer i]
+  (fn []
+    (when-let [t (.getDate rs i)]
+      (t/zoned-date-time (t/local-date t) (t/local-time 0) (t/zone-id "UTC")))))
+
+(defmethod sql-jdbc.execute/read-column-thunk [:databricks-sql Types/TIMESTAMP]
+  [_ ^ResultSet rs _rsmeta ^Integer i]
+  (fn []
+    (when-let [t (.getTimestamp rs i)]
+      (t/zoned-date-time (t/local-date-time t) (t/zone-id "UTC")))))
