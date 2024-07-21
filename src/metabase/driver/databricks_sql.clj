@@ -110,55 +110,6 @@
                             (deref tables-info)))})
 
 
-
-;; ----------------DEPRECATED----------------
-;;(defmethod driver/describe-database :databricks-sql
-;;  [_ database]
-;;  {:tables
-;;   (with-open [conn (jdbc/get-connection (sql-jdbc.conn/db->pooled-connection-spec database))]
-;;     (let [catalogs (jdbc/query {:connection conn} ["show catalogs"])
-;;           tables-info (atom #{})]
-;;       (doseq [catalog-row catalogs]
-;;         (let [catalog-name (:catalog catalog-row)]
-;;           (when-not (or (= catalog-name "__databricks_internal") (= catalog-name "system") (= catalog-name "samples"))
-;;             (let [schemas (jdbc/query {:connection conn} [(str "show schemas in " catalog-name)])]
-;;               (doseq [schema-row schemas]
-;;                 (let [schema-name (:databasename schema-row)]
-;;                   (when (and (string? schema-name) (not (empty? schema-name)))
-;;                     (let [tables (jdbc/query {:connection conn} [(str "show tables in " (str catalog-name "." schema-name))])]
-;;                       (doseq [table-row tables]
-;;                         (let [tablename (:tablename table-row)]
-;;                           (when (and (string? tablename) (not (empty? tablename)))
-;;                             (swap! tables-info conj {:name tablename :schema (str catalog-name "." schema-name)}))))))))))))
-;;       (deref tables-info)))})
-
-;;(defn split-schema [schema]
-;;  (let [parts (clojure.string/split schema #"\.")]
-;;    {:dbname (first parts)
-;;     :schm-name (second parts)}))
-;;
-;;(defmethod driver/describe-table :databricks-sql
-;;  [_ database {table-name :name, schema :schema}]
-;;  (let [{:keys [dbname schm-name]} (split-schema schema)]
-;;    {:name   table-name
-;;     :schema schema
-;;     :fields
-;;     (with-open [conn (jdbc/get-connection (sql-jdbc.conn/db->pooled-connection-spec database))]
-;;       (let [results (jdbc/query {:connection conn} [(format
-;;                                                      "describe `%s`.`%s`.`%s`"
-;;                                                      dbname
-;;                                                      schm-name
-;;                                                      table-name)])]
-;;         (set
-;;          (for [[idx {col-name :col_name, data-type :data_type, :as result}] (m/indexed results)
-;;                :while (valid-describe-table-row? result)]
-;;            {:name              col-name
-;;             :database-type     data-type
-;;             :base-type         (sql-jdbc.sync/database-type->base-type :databricks-sql (keyword data-type))
-;;             :database-position idx}))))}))
-;;----------------DEPRECATED----------------
-
-
 (def ^:dynamic *param-splice-style*
   "How we should splice params into SQL (i.e. 'unprepare' the SQL). Either `:friendly` (the default) or `:paranoid`.
   `:friendly` makes a best-effort attempt to escape strings and generate SQL that is nice to look at, but should not
