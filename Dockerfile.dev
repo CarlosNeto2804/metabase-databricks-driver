@@ -1,0 +1,2 @@
+FROM metabase/metabase:v0.46.6.4 as main
+COPY --chown=2000:2000 /databricks-sql.metabase-driver.jar /plugins/databricks-sql.metabase-driver.jar

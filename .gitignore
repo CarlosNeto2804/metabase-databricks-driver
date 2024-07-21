@@ -13,3 +13,4 @@ pom.xml.asc
 .idea
 .cpcache
 local_test.clj
+databricks-sql.metabase-driver.jar
