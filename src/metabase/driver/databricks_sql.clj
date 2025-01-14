@@ -335,7 +335,13 @@
 
 (defmethod sql.qp/datetime-diff [:databricks-sql :second]
   [_driver _unit x y]
-  [:- [:unix_timestamp y] [:unix_timestamp x]])
+  [:-
+   [:unix_timestamp y (if (instance? LocalDate y)
+                        (h2x/literal "yyyy-MM-dd")
+                        (h2x/literal "yyyy-MM-dd HH:mm:ss"))]
+   [:unix_timestamp x (if (instance? LocalDate x)
+                        (h2x/literal "yyyy-MM-dd")
+                        (h2x/literal "yyyy-MM-dd HH:mm:ss"))]])
 
 (defmethod unprepare/unprepare-value [:databricks-sql String]
   [_ ^String s]
