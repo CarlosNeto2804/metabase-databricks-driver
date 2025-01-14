@@ -333,7 +333,7 @@
   [driver _unit x y]
   [:div (sql.qp/datetime-diff driver :second x y) 60])
 
-(defmethod sql.qp/datetime-diff [:databricks :second]
+(defmethod sql.qp/datetime-diff [:databricks-sql :second]
   [_driver _unit x y]
   [:-
    [:unix_timestamp y (if (instance? LocalDate y)
